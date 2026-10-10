@@ -127,3 +127,7 @@ The generated archive's `docs/VERIFICATION.md` records checks actually performed
 ## Meteora integration
 
 See [docs/METEORA.md](docs/METEORA.md) for the complete local DBC launch → trading → fee funding → DAMM v2 graduation → continued reward workflow. Start with its verification commands, then run the cloned-program validator and `npm run meteora -- demo`. Real stock quotes and production deployment remain outside this local harness.
+
+## Frontend
+
+The Vestra React frontend is in `app/`. See [docs/FRONTEND.md](docs/FRONTEND.md) for installation and the browser acceptance workflow. Keep the local validator running, start `npm run app:service`, then `npm run app:dev` and open http://127.0.0.1:5173. User transactions are signed in the browser; collector keys remain in the localhost service.
