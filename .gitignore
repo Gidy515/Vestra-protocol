@@ -9,3 +9,6 @@ test-ledger/
 
 .vestra/
 meteora-integration.patch
+
+app/dist/
+app/.env.local

@@ -11,7 +11,11 @@
     "test:local": "bash scripts/test-local.sh",
     "meteora:validator": "tsx scripts/meteora/start-validator.ts",
     "meteora": "tsx scripts/meteora/cli.ts",
-    "test:meteora": "tsx --test tests/meteora/offline.test.ts"
+    "test:meteora": "tsx --test tests/meteora/offline.test.ts",
+    "app:dev": "npm --prefix app run dev",
+    "app:build": "npm --prefix app run build",
+    "app:service": "tsx scripts/frontend-server.ts",
+    "test:frontend": "node --import tsx --test tests/frontend.test.ts"
   },
   "dependencies": {
     "@anchor-lang/core": "1.1.2",

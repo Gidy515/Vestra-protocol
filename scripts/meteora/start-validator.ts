@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 const wallet = process.env.ANCHOR_WALLET || path.join(os.homedir(),'.config/solana/id.json');
 const payer=Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(wallet,'utf8'))));
+fs.mkdirSync('.vestra/ledger',{recursive:true});
 const args=['--ledger','.vestra/ledger','--mint',payer.publicKey.toBase58(),'--url','https://api.mainnet-beta.solana.com'];
 for (const program of ['dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN','cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG','metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s']) args.push('--clone-upgradeable-program',program);
 args.push('--clone','A8gMrEPJkacWkcb3DGwtJwTe16HktSEfvwtuDh2MCtck');
