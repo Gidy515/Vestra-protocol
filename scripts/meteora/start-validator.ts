@@ -1,0 +1,14 @@
+import { spawn } from 'node:child_process';
+import { Keypair } from '@solana/web3.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+const wallet = process.env.ANCHOR_WALLET || path.join(os.homedir(),'.config/solana/id.json');
+const payer=Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(wallet,'utf8'))));
+const args=['--ledger','.vestra/ledger','--mint',payer.publicKey.toBase58(),'--url','https://api.mainnet-beta.solana.com'];
+for (const program of ['dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN','cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG','metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s']) args.push('--clone-upgradeable-program',program);
+args.push('--clone','A8gMrEPJkacWkcb3DGwtJwTe16HktSEfvwtuDh2MCtck');
+const child=spawn('solana-test-validator',args,{stdio:'inherit'});
+child.on('error',e=>{console.error(e);process.exitCode=1;});
+child.on('exit',code=>{process.exitCode=code||0;});
+for(const signal of ['SIGINT','SIGTERM'] as const) process.on(signal,()=>child.kill(signal));

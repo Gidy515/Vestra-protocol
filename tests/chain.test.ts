@@ -4,7 +4,7 @@ import * as anchor from "@anchor-lang/core";
 import { Keypair, SystemProgram, Transaction } from "@solana/web3.js";
 import {
   AuthorityType, createMint, getAccount, getOrCreateAssociatedTokenAccount,
-  mintTo, setAuthority, TOKEN_PROGRAM_ID,
+  mintTo, setAuthority, TOKEN_PROGRAM_ID, createAccount, createMintToInstruction,
 } from "@solana/spl-token";
 import { bn, VestraClient, loadProgram } from "../scripts/client";
 
@@ -132,7 +132,19 @@ test("custody, authorized funding, weighted rewards, expiry, and reconciliation"
     assert.equal(s.carry.toString(), "750000");
     assert.equal((await client.epochState(launch, 1)).totalWeight.toString(), "2500000");
   });
-  await fund(1, 1_000_000);
+  await t.test("atomic receipt ingestion reads tokens credited by preceding instruction", async () => {
+    const source = await createAccount(connection, payer, quote, payer.publicKey, Keypair.generate());
+    const deposit = await program.methods.fundCollectedBalance().accountsStrict({
+      collector: payer.publicKey, launch, quoteMint: quote, source,
+      rewardVault: client.rewards(launch), epoch: client.epoch(launch, 1), tokenProgram: TOKEN_PROGRAM_ID,
+    }).instruction();
+    await provider.sendAndConfirm(new Transaction().add(
+      createMintToInstruction(quote, source, payer.publicKey, 1_000_000), deposit,
+    ));
+    assert.equal((await getAccount(connection, source)).amount, 0n);
+    assert.equal((await client.epochState(launch, 1)).receipts.toString(), "1000000");
+    await assert.rejects(provider.sendAndConfirm(new Transaction().add(deposit)), /ZeroAmount/);
+  });
   const claim = async (position: typeof short, index: number) => provider.sendAndConfirm(new Transaction().add(
     await client.claimIx(launch, position, payer.publicKey, quote, quoteAccount.address, index),
   ));

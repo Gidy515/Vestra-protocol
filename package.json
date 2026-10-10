@@ -8,10 +8,15 @@
     "typecheck": "tsc --noEmit",
     "setup": "bash scripts/setup.sh",
     "build": "anchor build",
-    "test:local": "bash scripts/test-local.sh"
+    "test:local": "bash scripts/test-local.sh",
+    "meteora:validator": "tsx scripts/meteora/start-validator.ts",
+    "meteora": "tsx scripts/meteora/cli.ts",
+    "test:meteora": "tsx --test tests/meteora/offline.test.ts"
   },
   "dependencies": {
     "@anchor-lang/core": "1.1.2",
+    "@meteora-ag/cp-amm-sdk": "1.5.1",
+    "@meteora-ag/dynamic-bonding-curve-sdk": "1.5.13",
     "@solana/spl-token": "0.4.14",
     "@solana/web3.js": "1.98.4"
   },

@@ -123,3 +123,7 @@ Do not add the frontend until that path works end to end.
 ## Verification
 
 The generated archive's `docs/VERIFICATION.md` records checks actually performed.
+
+## Meteora integration
+
+See [docs/METEORA.md](docs/METEORA.md) for the complete local DBC launch → trading → fee funding → DAMM v2 graduation → continued reward workflow. Start with its verification commands, then run the cloned-program validator and `npm run meteora -- demo`. Real stock quotes and production deployment remain outside this local harness.

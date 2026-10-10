@@ -152,8 +152,15 @@ pub mod vestra {
         Ok(())
     }
 
-    /// Authorized receipt ingestion. Actual tokens are moved, not just booked.
-    /// Meteora provenance verification belongs to the next integration chunk.
+    /// Intended for SDK fee-claim + funding in ONE transaction. This instruction
+    /// reads the collector token account after the preceding claim instruction.
+    /// It is authorized receipt ingestion, not on-chain Meteora provenance proof.
+    pub fn fund_collected_balance(ctx: Context<FundEpoch>) -> Result<()> {
+        let amount = ctx.accounts.source.amount;
+        fund_epoch(ctx, amount)
+    }
+
+    /// Authorized receipt ingestion. Provenance is a collector trust assumption.
     pub fn fund_epoch(ctx: Context<FundEpoch>, amount: u64) -> Result<()> {
         require!(amount > 0, VestraError::ZeroAmount);
         let launch = &mut ctx.accounts.launch;
