@@ -6,3 +6,6 @@ test-ledger/
 *.log
 
 *.before-boxing
+
+.vestra/
+meteora-integration.patch
