@@ -1,0 +1,8 @@
+node_modules/
+target/
+.anchor/
+.env
+test-ledger/
+*.log
+
+*.before-boxing

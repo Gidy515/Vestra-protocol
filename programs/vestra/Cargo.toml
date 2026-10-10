@@ -1,0 +1,30 @@
+[package]
+name = "vestra"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "vestra"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+# Enables a short epoch for LOCAL tests only. Do not deploy this feature.
+demo-clock = []
+
+[dependencies]
+anchor-lang = "=1.1.2"
+# Anchor's generated token-account initialization references these modules even
+# for Account<TokenAccount>. Runtime accounts are still legacy SPL-only here.
+anchor-spl = { version = "=1.1.2", default-features = false, features = ["token", "token_2022"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
