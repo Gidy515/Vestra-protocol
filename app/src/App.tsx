@@ -188,9 +188,9 @@ export default function App() {
   }, []);
   useEffect(() => {
     void refresh();
-    const id = setInterval(() => void refresh(), 8000);
+    const id = setInterval(() => void refresh(), boot?.cluster === "devnet" ? 15000 : 8000);
     return () => clearInterval(id);
-  }, [refresh]);
+  }, [refresh, boot?.cluster]);
   useEffect(() => {
     const id = setInterval(
       () => setNow(Date.now() / 1000 + clockOffset.current),
@@ -323,6 +323,7 @@ export default function App() {
     }
   }
   async function connect(kind: "Phantom" | "Solflare" | "Local demo") {
+    if (kind === "Local demo" && boot?.cluster === "devnet") { show("Use Phantom or Solflare on devnet"); return; }
     await action("Wallet connection", async () => {
       setWallet(
         kind === "Local demo" ? localWallet() : await injectedWallet(kind),
@@ -431,7 +432,7 @@ export default function App() {
         </div>
         {hasEpochs && claimEnd - p.next > 10 && (
           <p className="micro">
-            Up to 10 epochs per click. Repeat to settle the remaining{" "}
+            Up to 10 epochs per click, grouped into at most two transactions. Repeat to settle the remaining{" "}
             {claimEnd - p.next} epochs.
           </p>
         )}
@@ -474,7 +475,7 @@ export default function App() {
           <div className="header-actions">
             <span className="network">
               <i />
-              Localnet
+              {boot?.cluster === "devnet" ? "Devnet" : "Localnet"}
             </span>
             <button
               className="button secondary launch-nav"
@@ -496,7 +497,7 @@ export default function App() {
       </header>
       <div className="demo-strip">
         <span>
-          <ShieldCheck size={13} /> LOCAL DEMO
+          <ShieldCheck size={13} /> {boot?.cluster === "devnet" ? "DEVNET DEMO" : "LOCAL DEMO"}
         </span>
         <p>
           mSTOCK is a mock quote asset. Rewards come from actual collected
@@ -917,7 +918,7 @@ export default function App() {
                             <strong>
                               {current.epochSeconds === 10
                                 ? days * 10 + "s"
-                                : days + " days"}
+                                : current.epochSeconds === 60 ? days + " min" : days + " days"}
                             </strong>
                             <span>{[1, 1.5, 2][i]}× weight</span>
                             {tier === i && <Check size={12} />}
@@ -981,7 +982,7 @@ export default function App() {
                         Locks cannot be cancelled.{" "}
                         {current.epochSeconds === 10
                           ? "Demo uses 10-second epochs."
-                          : "Production uses daily epochs."}{" "}
+                          : current.epochSeconds === 60 ? "Devnet demo uses 60-second epochs." : "Production uses daily epochs."}{" "}
                         Rewards vary with funded fees; no guaranteed yield.
                       </p>
                     </>
@@ -990,7 +991,7 @@ export default function App() {
                     <div className="wallet-foot">
                       <WalletIcon size={13} />
                       {wallet.kind}
-                      <span>{number(balances.sol / 1e9, 3)} local SOL</span>
+                      <span>{number(balances.sol / 1e9, 3)} {boot?.cluster === "devnet" ? "devnet" : "local"} SOL</span>
                     </div>
                   )}
                 </div>
@@ -1270,7 +1271,7 @@ export default function App() {
                   [
                     "01",
                     "Launch a community",
-                    "Create a token on Meteora’s bonding curve, paired with our local mock quote asset.",
+                    "Create a token on Meteora’s bonding curve, paired with our mock quote asset.",
                     Plus,
                   ],
                   [
@@ -1311,7 +1312,7 @@ export default function App() {
             {activity.slice(0, 4).map((a) => (
               <div key={a.signature}>
                 <CheckCircle2 size={14} />
-                <code>{short(a.signature)}</code>
+                {boot?.cluster === "devnet" ? <a href={`https://explorer.solana.com/tx/${a.signature}?cluster=devnet`} target="_blank" rel="noreferrer"><code>{short(a.signature)}</code></a> : <code>{short(a.signature)}</code>}
                 <span>{new Date(a.time).toLocaleTimeString()}</span>
                 <button
                   onClick={() =>
@@ -1393,7 +1394,7 @@ export default function App() {
                   {wallet ? "Your wallet" : "Connect to Vestra"}
                 </h2>
                 <p>
-                  Local validator transactions. Your wallet signs your trades
+                  Test-network transactions. Your wallet signs your trades
                   and locks.
                 </p>
                 {wallet ? (
@@ -1435,7 +1436,7 @@ export default function App() {
                       <ArrowRight size={16} />
                     </button>
                     <button
-                      disabled={!!busy || !boot}
+                      disabled={!!busy || !boot || boot.cluster === "devnet"}
                       onClick={() => void connect("Local demo")}
                     >
                       <span className="wallet-symbol local">
@@ -1443,7 +1444,7 @@ export default function App() {
                       </span>
                       <div>
                         <strong>Local demo wallet</strong>
-                        <small>No extension needed</small>
+                        <small>{boot?.cluster === "devnet" ? "Localnet only — use Phantom or Solflare" : "No extension needed"}</small>
                       </div>
                       <ArrowRight size={16} />
                     </button>
@@ -1452,7 +1453,7 @@ export default function App() {
                 <p className="micro">
                   The demo wallet is generated in this browser and retained for
                   this tab’s session. Never send real assets to it. Extensions
-                  must support signing local validator transactions.
+                  must support the selected network. For devnet, select Devnet in your wallet settings.
                 </p>
               </>
             ) : (
@@ -1525,7 +1526,7 @@ export default function App() {
                   <div className="launch-config">
                     <div>
                       <span>Quote asset</span>
-                      <strong>mSTOCK · local mock</strong>
+                      <strong>mSTOCK · mock asset</strong>
                     </div>
                     <div>
                       <span>Token supply</span>

@@ -131,3 +131,7 @@ See [docs/METEORA.md](docs/METEORA.md) for the complete local DBC launch → tra
 ## Frontend
 
 The Vestra React frontend is in `app/`. See [docs/FRONTEND.md](docs/FRONTEND.md) for installation and the browser acceptance workflow. Keep the local validator running, start `npm run app:service`, then `npm run app:dev` and open http://127.0.0.1:5173. User transactions are signed in the browser; collector keys remain in the localhost service.
+
+## Devnet demo
+
+See [docs/DEVNET.md](docs/DEVNET.md) for the isolated devnet deployment, mock-asset launch, real Meteora fee collection, graduation, and browser acceptance workflow. The `devnet-demo` build uses 60-second epochs; production builds still use daily epochs.

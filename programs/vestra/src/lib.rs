@@ -6,13 +6,18 @@ pub mod math;
 pub mod state;
 use error::VestraError;
 use state::*;
+// YAfhYHXTEfXrXiRtSKTT1d79tRnrP63d67RQCprAx3j
 
 declare_id!("8AXvPZN7mSM2twASsL9QqKqLqQBnJLGjDKBmzZktnx7K");
 
-#[cfg(not(feature = "demo-clock"))]
+#[cfg(all(feature = "demo-clock", feature = "devnet-demo"))]
+compile_error!("Choose one demo clock feature");
+#[cfg(not(any(feature = "demo-clock", feature = "devnet-demo")))]
 pub const EPOCH_SECONDS: i64 = 86_400;
-#[cfg(feature = "demo-clock")]
+#[cfg(all(feature = "demo-clock", not(feature = "devnet-demo")))]
 pub const EPOCH_SECONDS: i64 = 10;
+#[cfg(feature = "devnet-demo")]
+pub const EPOCH_SECONDS: i64 = 60;
 
 #[program]
 pub mod vestra {

@@ -22,10 +22,11 @@ import {
   deriveDbcPoolAuthority,
 } from "@meteora-ag/dynamic-bonding-curve-sdk";
 import { CpAmm } from "@meteora-ag/cp-amm-sdk";
-import { rewardForEpoch, claimWindow } from "./rewards";
+import { rewardForEpoch, claimWindow, claimBatches } from "./rewards";
 import { rawAmount } from "../../scripts/meteora/config";
 
 export type Bootstrap = {
+  cluster: "localnet" | "devnet";
   session: string;
   genesis: string;
   program: string;
@@ -135,7 +136,7 @@ export async function api<T>(
   });
   const result = await response.json();
   if (!response.ok)
-    throw new Error(result.error || "Local service request failed");
+    throw new Error(result.error || "Vestra service request failed");
   return result;
 }
 export function localWallet(): Wallet {
@@ -205,8 +206,11 @@ export class Chain {
     readonly wallet: Wallet,
     readonly confirmed: (sig: string) => void,
   ) {
-    if (!["127.0.0.1", "localhost"].includes(new URL(boot.rpc).hostname))
-      throw new Error("This build only supports the local validator");
+    if (boot.cluster === "devnet") {
+      if (boot.genesis !== "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG" || new URL(boot.rpc).protocol !== "https:")
+        throw new Error("Invalid devnet configuration");
+    } else if (boot.cluster !== "localnet" || !["127.0.0.1", "localhost"].includes(new URL(boot.rpc).hostname))
+      throw new Error("Invalid localnet configuration");
     this.connection = new Connection(boot.rpc, "confirmed");
     this.provider = new AnchorProvider(this.connection, wallet, {
       commitment: "confirmed",
@@ -385,31 +389,18 @@ export class Chain {
       }),
     );
   }
-  async ensureEpoch(l: PublicKey, index: number) {
-    const epoch = this.epoch(l, index);
-    if (await this.connection.getAccountInfo(epoch)) return;
-    try {
-      await this.send(
-        new Transaction().add(
-          await this.program.methods
-            .createEpoch(bn(index))
-            .accountsStrict({
-              payer: this.wallet.publicKey,
-              launch: l,
-              epoch,
-              systemProgram: SystemProgram.programId,
-            })
-            .instruction(),
-        ),
-      );
-    } catch (e) {
-      if (!(await this.connection.getAccountInfo(epoch))) throw e;
-    }
-  }
   async lock(l: Launch, input: string, tier: number) {
     if (![0, 1, 2].includes(tier)) throw new Error("Invalid lock duration");
-    const s = await this.state(l),
-      index = s.currentEpoch.toNumber(),
+    let s = await this.state(l);
+    if (await this.time() >= s.origin.toNumber() + (s.currentEpoch.toNumber() + 1) * s.epochSeconds.toNumber()) {
+      await api("keeper", this.boot, {});
+      for (let attempt = 0; attempt < 20; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        s = await this.state(l);
+        if (await this.time() < s.origin.toNumber() + (s.currentEpoch.toNumber() + 1) * s.epochSeconds.toNumber()) break;
+      }
+    }
+    const index = s.currentEpoch.toNumber(),
       start = index + 1,
       end = start + [7, 30, 90][tier];
     if (
@@ -418,8 +409,21 @@ export class Chain {
     )
       throw new Error("Keeper is catching up. Retry after the next refresh.");
     const address = pk(l.address);
-    await this.ensureEpoch(address, start);
-    await this.ensureEpoch(address, end);
+    const tx = new Transaction();
+    const indices = [start, end];
+    const schedules = await this.connection.getMultipleAccountsInfo(
+      indices.map(index => this.epoch(address, index)),
+    );
+    for (let i = 0; i < indices.length; i++) {
+      if (schedules[i]) continue;
+      tx.add(await this.program.methods.createEpoch(bn(indices[i]))
+        .accountsStrict({
+          payer: this.wallet.publicKey,
+          launch: address,
+          epoch: this.epoch(address, indices[i]),
+          systemProgram: SystemProgram.programId,
+        }).instruction());
+    }
     const nonce = BigInt(
       "0x" +
         Array.from(crypto.getRandomValues(new Uint8Array(8)), (n) =>
@@ -427,7 +431,7 @@ export class Chain {
         ).join(""),
     );
     return this.send(
-      new Transaction().add(
+      tx.add(
         await this.program.methods
           .lockTokens(bn(nonce), bn(rawAmount(input, 6)), tier)
           .accountsStrict({
@@ -496,37 +500,30 @@ export class Chain {
     const owner = this.wallet.publicKey,
       launch = pk(l.address),
       destination = getAssociatedTokenAddressSync(pk(l.quote), owner);
-    const state = await this.state(l),
-      end = Math.min(state.currentEpoch.toNumber(), p.end);
-    // Bound prompts per click. Re-fetching cursor lets the next click safely resume.
-    for (const index of claimWindow(
-      p.next,
-      state.currentEpoch.toNumber(),
-      p.end,
-    ))
-      await this.send(
-        new Transaction().add(
-          createAssociatedTokenAccountIdempotentInstruction(
-            owner,
-            destination,
-            owner,
-            pk(l.quote),
-          ),
-          await this.program.methods
-            .claimEpoch()
-            .accountsStrict({
-              owner,
-              launch,
-              quoteMint: pk(l.quote),
-              position: pk(p.address),
-              epoch: this.epoch(launch, index),
-              rewardVault: this.vault("rewards", launch),
-              destination,
-              tokenProgram: TOKEN_PROGRAM_ID,
-            })
-            .instruction(),
+    const state = await this.state(l);
+    const indices = claimWindow(p.next, state.currentEpoch.toNumber(), p.end);
+    // Confirm batches in order: every instruction advances the same claim cursor.
+    // A failed or rejected batch rolls back; a refresh resumes from chain state.
+    for (const batch of claimBatches(indices)) {
+      const tx = new Transaction().add(
+        createAssociatedTokenAccountIdempotentInstruction(
+          owner, destination, owner, pk(l.quote),
         ),
       );
+      for (const index of batch) {
+        tx.add(await this.program.methods.claimEpoch().accountsStrict({
+          owner,
+          launch,
+          quoteMint: pk(l.quote),
+          position: pk(p.address),
+          epoch: this.epoch(launch, index),
+          rewardVault: this.vault("rewards", launch),
+          destination,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        }).instruction());
+      }
+      await this.send(tx);
+    }
   }
   async withdraw(l: Launch, p: Position) {
     const owner = this.wallet.publicKey,
@@ -571,7 +568,9 @@ export class Chain {
     });
     const authority = deriveDbcPoolAuthority(),
       balance = await this.connection.getBalance(authority);
-    if (balance < 1_000_000_000)
+    if (this.boot.cluster === "devnet" && balance < 50_000_000)
+      throw new Error("Meteora devnet migration authority is underfunded; contact the operator");
+    if (this.boot.cluster === "localnet" && balance < 1_000_000_000)
       m.transaction.instructions.unshift(
         SystemProgram.transfer({
           fromPubkey: this.wallet.publicKey,

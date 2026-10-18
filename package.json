@@ -15,7 +15,14 @@
     "app:dev": "npm --prefix app run dev",
     "app:build": "npm --prefix app run build",
     "app:service": "tsx scripts/frontend-server.ts",
-    "test:frontend": "node --import tsx --test tests/frontend.test.ts"
+    "test:frontend": "node --import tsx --test tests/frontend.test.ts",
+    "devnet:check": "VESTRA_CLUSTER=devnet tsx scripts/devnet-check.ts",
+    "devnet:init": "VESTRA_CLUSTER=devnet tsx scripts/meteora/cli.ts init",
+    "devnet:meteora": "VESTRA_CLUSTER=devnet tsx scripts/meteora/cli.ts",
+    "devnet:service": "VESTRA_CLUSTER=devnet tsx scripts/frontend-server.ts",
+    "devnet:build": "anchor build -- --features devnet-demo",
+    "test:network": "node --import tsx --test tests/network.test.ts",
+    "devnet:deploy": "bash scripts/deploy-devnet.sh"
   },
   "dependencies": {
     "@anchor-lang/core": "1.1.2",

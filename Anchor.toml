@@ -8,6 +8,9 @@ skip-lint = false
 [programs.localnet]
 vestra = "8AXvPZN7mSM2twASsL9QqKqLqQBnJLGjDKBmzZktnx7K"
 
+[programs.devnet]
+vestra = "8AXvPZN7mSM2twASsL9QqKqLqQBnJLGjDKBmzZktnx7K"
+
 [provider]
 cluster = "localnet"
 wallet = "~/.config/solana/id.json"

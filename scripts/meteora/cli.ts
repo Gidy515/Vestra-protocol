@@ -5,13 +5,25 @@ import { Transaction, SystemProgram, Keypair } from '@solana/web3.js';
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import { buildLaunchConfig, rawAmount } from './config';
-import { context, load, save, keyFile, pk, bn, send, ata, catchUp, chainTime, sleep, STATE_FILE, Manifest } from './runtime';
+import { context, load, save, keyFile, pk, bn, send, ata, catchUp, chainTime, sleep, STATE_FILE, Manifest, NETWORK, verifyNetwork } from './runtime';
 
 const MAX = bn('18446744073709551615');
 const c = context();
 const dbc = new DynamicBondingCurveClient(c.connection, 'confirmed');
 const amm = new CpAmm(c.connection);
 async function init() {
+  await verifyNetwork(c);
+  const dependencies = await c.connection.getMultipleAccountsInfo([
+    pk('dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN'),
+    pk('cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG'),
+    pk('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s'),
+    DAMM_V2_MIGRATION_FEE_ADDRESS[6], c.program.programId,
+  ]);
+  if (dependencies.slice(0,3).some(x => !x?.executable) || !dependencies[4]?.executable)
+    throw new Error('Required programs are not deployed on this cluster');
+  if (!dependencies[3]?.owner.equals(pk('cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG')))
+    throw new Error('DAMM migration config missing or has wrong owner');
+  await amm.fetchConfigState(DAMM_V2_MIGRATION_FEE_ADDRESS[6]);
   const config = keyFile('config').key, base = keyFile('base').key;
   const collector = keyFile('collector');
   const quoteKey = keyFile('mock-quote').key;
@@ -48,6 +60,8 @@ async function init() {
     launch:pk(m.launch),epoch:c.client.epoch(pk(m.launch),0),principalVault:c.client.principal(pk(m.launch)),
     rewardVault:c.client.rewards(pk(m.launch)),tokenProgram:TOKEN_PROGRAM_ID,systemProgram:SystemProgram.programId,
   }).instruction()));
+  const epochSeconds=(await c.client.launchState(pk(m.launch))).epochSeconds.toNumber();
+  if (NETWORK.cluster === 'devnet' && epochSeconds !== 60) throw new Error('Devnet demo requires the devnet-demo build (60-second epochs)');
   m.registered=true; save(m); console.log('Initialized mock-stock launch:',m.dbcPool);
 }
 async function checked(m:Manifest) {
@@ -121,7 +135,9 @@ async function graduate(m:Manifest) {
     const migration=await dbc.migration.migrateToDammV2({payer:c.payer.publicKey,pool:pk(m.dbcPool),dammConfig:pk(m.dammConfig)});
     const rentAuthority = deriveDbcPoolAuthority();
     const balance = await c.connection.getBalance(rentAuthority);
-    if (balance < 1_000_000_000) {
+    if (NETWORK.cluster === 'devnet' && balance < 50_000_000)
+      throw new Error('Meteora devnet migration rent authority is underfunded. Do not apply the localnet top-up workaround to the shared devnet PDA.');
+    if (NETWORK.cluster === 'localnet' && balance < 1_000_000_000) {
       migration.transaction.instructions.unshift(SystemProgram.transfer({
         fromPubkey: c.payer.publicKey,
         toPubkey: rentAuthority,
@@ -152,7 +168,24 @@ async function claim(m:Manifest,nonce:number) {
     await send(c,new Transaction().add(await c.client.claimIx(pk(m.launch),position,c.payer.publicKey,pk(m.quote),destination,index)));
   }
 }
+async function withdraw(m:Manifest,nonce:number) {
+  const position=c.client.position(pk(m.launch),c.payer.publicKey,nonce);
+  await send(c,new Transaction().add(await c.program.methods.withdrawUnlocked().accountsStrict({
+    owner:c.payer.publicKey,launch:pk(m.launch),baseMint:pk(m.base),position,
+    principalVault:c.client.principal(pk(m.launch)),destination:await ata(c,pk(m.base),c.payer.publicKey),tokenProgram:TOKEN_PROGRAM_ID,
+  }).instruction()));
+}
+async function audit(m:Manifest) {
+  const s=await c.client.launchState(pk(m.launch));
+  const rewards=(await getAccount(c.connection,c.client.rewards(pk(m.launch)))).amount;
+  const principal=(await getAccount(c.connection,c.client.principal(pk(m.launch)))).amount;
+  assert.equal(rewards+BigInt(s.totalPlatformPaid.toString())+BigInt(s.totalLockerPaid.toString()),BigInt(s.totalReceived.toString()));
+  assert.equal(principal,BigInt(s.outstandingPrincipal.toString()));
+  console.log({cluster:NETWORK.cluster,program:m.program,launch:m.launch,epochSeconds:s.epochSeconds.toString(),
+    funded:s.totalReceived.toString(),platformPaid:s.totalPlatformPaid.toString(),lockerPaid:s.totalLockerPaid.toString(),rewards:rewards.toString(),principal:principal.toString(),reconciled:true});
+}
 async function main() {
+  await verifyNetwork(c);
   const [command,input,nonce='0',tier='0']=process.argv.slice(2);
   if(command==='init') return init();
   if(command==='demo') {
@@ -160,9 +193,9 @@ async function main() {
     await init();
     const m=await load(c);
     const initial=await c.client.launchState(pk(m.launch));
-    assert.equal(initial.epochSeconds.toNumber(),10,'Build with demo-clock before running demo');
+    assert.equal(initial.epochSeconds.toNumber(),NETWORK.cluster === 'devnet' ? 60 : 10,'Wrong demo build: use devnet-demo for devnet, demo-clock for localnet');
     await trade(m,true,'10');
-    await lock(m,'100',0,1);
+    await lock(m,'100',0,NETWORK.cluster === 'devnet' ? 0 : 1);
     const position=c.client.position(pk(m.launch),c.payer.publicKey,0);
     const start=(await c.client.positionState(position)).startEpoch.toNumber();
     while(await catchUp(c,m)<start) await sleep(500);
@@ -191,6 +224,17 @@ async function main() {
     await claim(m,0);
     const rewardAfter=BigInt((await c.client.launchState(pk(m.launch))).totalLockerPaid.toString());
     assert(rewardAfter>rewardBefore,'Eligible locker must receive quote rewards');
+    if (NETWORK.cluster === 'devnet') {
+      const p=await c.client.positionState(position),s=await c.client.launchState(pk(m.launch));
+      console.log('Waiting for the 7-minute demo lock to expire before testing withdrawal');
+      const end=s.origin.toNumber()+p.endEpoch.toNumber()*s.epochSeconds.toNumber();
+      while(await chainTime(c)<end) await sleep(2000);
+      await catchUp(c,m);
+      await claim(m,0);
+      await withdraw(m,0);
+      assert.equal((await c.client.positionState(position)).withdrawn,true);
+      await audit(m);
+    }
     console.log('PASS: DBC fees → graduation → DAMM fees → locker rewards');
     return;
   }
@@ -201,9 +245,11 @@ async function main() {
     case 'graduate': return graduate(m);
     case 'lock': return lock(m,input,Number(nonce),Number(tier));
     case 'claim': return claim(m,Number(input||0));
+    case 'withdraw': return withdraw(m,Number(input||0));
+    case 'audit': return audit(m);
     case 'status': { const {pool,config}=await checked(m); console.log({pool:m.dbcPool,migrated:pool.poolState.isMigrated,reserve:pool.poolState.quoteReserve.toString(),threshold:config.migrationQuoteThreshold.toString(),funded:(await c.client.launchState(pk(m.launch))).totalReceived.toString()}); return; }
     case 'keeper': for (;;) { await collect(m); await sleep(5000); }
-    default: throw new Error('Commands: init | buy QUOTE | sell BASE | lock BASE NONCE TIER | collect | graduate | claim NONCE | status | keeper');
+    default: throw new Error('Commands: init | buy QUOTE | sell BASE | lock BASE NONCE TIER | collect | graduate | claim NONCE | withdraw NONCE | audit | status | keeper');
   }
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

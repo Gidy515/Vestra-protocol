@@ -33,6 +33,7 @@ import {
   send,
   chainTime,
   Manifest,
+  NETWORK, STATE_DIR,
 } from "./meteora/runtime";
 
 async function main() {
@@ -40,8 +41,10 @@ async function main() {
     dbc = new DynamicBondingCurveClient(c.connection, "confirmed"),
     amm = new CpAmm(c.connection);
   const original = await load(c);
+  const browserGenesis = await new Connection(NETWORK.browserRpc, "confirmed").getGenesisHash();
+  if (browserGenesis !== original.genesis) throw new Error("Browser and server RPCs point to different networks");
   const session = randomBytes(32).toString("hex");
-  const catalogFile = path.resolve(".vestra/catalog.json");
+  const catalogFile = path.join(STATE_DIR, "catalog.json");
   type Metadata = { name: string; symbol: string; avatar: string };
   const catalog: Record<string, Metadata> = fs.existsSync(catalogFile)
     ? JSON.parse(fs.readFileSync(catalogFile, "utf8"))
@@ -82,7 +85,7 @@ async function main() {
     }
     return JSON.parse(text || "{}");
   }
-  async function discover() {
+  async function discoverFresh() {
     const rows = await (c.program.account as any).launch.all();
     const result = [];
     for (const row of rows) {
@@ -159,6 +162,15 @@ async function main() {
       });
     }
     return result;
+  }
+  let discovery: Promise<Awaited<ReturnType<typeof discoverFresh>>> | undefined;
+  let discoveryAt = 0;
+  async function discover() {
+    if (!discovery || Date.now() - discoveryAt > (NETWORK.cluster === "devnet" ? 10_000 : 0)) {
+      discoveryAt = Date.now();
+      discovery = discoverFresh().catch(e => { discovery = undefined; throw e; });
+    }
+    return discovery;
   }
   async function collect(m: Manifest) {
     const source = await ata(c, pk(m.quote), collector.publicKey);
@@ -281,8 +293,9 @@ async function main() {
           treasury: original.treasury,
           dammConfig: original.dammConfig,
           idl: JSON.parse(fs.readFileSync("target/idl/vestra.json", "utf8")),
-          rpc: "http://127.0.0.1:8899",
-          mockQuote: true,
+          rpc: NETWORK.browserRpc,
+          cluster: NETWORK.cluster,
+          mockQuote: original.mockQuote,
         });
       if (req.method === "GET" && url.pathname === "/api/launches")
         return json(res, {
@@ -331,15 +344,19 @@ async function main() {
           throw new Error("Wallet must be on curve");
         if ((faucetCounts.get(key) || 0) >= 3)
           throw new Error(
-            "Local faucet limit reached for this wallet; restart the service to reset",
+            "Demo funding limit reached for this wallet",
           );
         faucetCounts.set(key, (faucetCounts.get(key) || 0) + 1);
-        const sol = await c.connection.requestAirdrop(owner, 2_000_000_000);
-        const block = await c.connection.getLatestBlockhash();
-        await c.connection.confirmTransaction(
-          { ...block, signature: sol },
-          "confirmed",
-        );
+        const sol = NETWORK.cluster === "devnet"
+          ? await send(c, new Transaction().add(SystemProgram.transfer({
+              fromPubkey: c.payer.publicKey, toPubkey: owner, lamports: 20_000_000,
+            })))
+          : await c.connection.requestAirdrop(owner, 2_000_000_000);
+        if (NETWORK.cluster === "localnet") {
+          // Airdrop has no caller-provided blockhash; confirm its actual signature.
+          const result = await c.connection.confirmTransaction(sol, "confirmed");
+          if (result.value.err) throw new Error("Local airdrop failed");
+        }
         const destination = await getOrCreateAssociatedTokenAccount(
           c.connection,
           c.payer,
@@ -359,7 +376,7 @@ async function main() {
           signature,
           sol,
           quote: "100",
-          label: "Local mock assets only",
+          label: NETWORK.cluster === "devnet" ? "Devnet test assets only" : "Local mock assets only",
         });
       }
       if (req.method === "POST" && url.pathname === "/api/keeper") {
@@ -373,11 +390,11 @@ async function main() {
   });
   server.listen(8787, "127.0.0.1", () => {
     console.log(
-      "Vestra local service: http://127.0.0.1:8787 (collector keys remain on disk)",
+      `Vestra ${NETWORK.cluster} service: http://127.0.0.1:8787 (collector keys remain on disk)`,
     );
     void keeper();
   });
-  const timer = setInterval(() => void keeper(), 5000);
+  const timer = setInterval(() => void keeper(), NETWORK.cluster === "devnet" ? 15_000 : 5000);
   for (const signal of ["SIGINT", "SIGTERM"] as const)
     process.on(signal, () => {
       clearInterval(timer);
