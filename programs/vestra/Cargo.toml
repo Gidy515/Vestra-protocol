@@ -19,6 +19,8 @@ custom-panic = []
 idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
 # Enables a short epoch for LOCAL tests only. Do not deploy this feature.
 demo-clock = []
+# Public devnet demo only; never use for a production deployment.
+devnet-demo = []
 
 [dependencies]
 anchor-lang = "=1.1.2"
