@@ -8,6 +8,7 @@ export type Wallet = {
   signAllTransactions: <T extends Transaction | VersionedTransaction>(
     txs: T[],
   ) => Promise<T[]>;
+  signMessage?: (message: Uint8Array) => Promise<Uint8Array>;
   disconnect?: () => Promise<void>;
   subscribe?: (fn: (key: PublicKey | null) => void) => () => void;
   kind: string;
@@ -53,6 +54,10 @@ export async function injectedWallet(
     publicKey: new PublicKey(injected.publicKey.toString()),
     kind,
     signTransaction: (tx) => injected.signTransaction(tx),
+    signMessage: injected.signMessage ? async message => {
+      const result = await injected.signMessage(message);
+      return result.signature || result;
+    } : undefined,
     signAllTransactions: async (txs) => {
       if (injected.signAllTransactions)
         return injected.signAllTransactions(txs);

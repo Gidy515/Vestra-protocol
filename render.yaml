@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: vestra-api
+    runtime: node
+    plan: 0.5c-512mb
+    numInstances: 1
+    buildCommand: npm ci --include=dev
+    startCommand: node --import tsx scripts/render-state.ts start
+    healthCheckPath: /healthz
+    disk:
+      name: vestra-state
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: 22.20.0
+      - key: VESTRA_CLUSTER
+        value: devnet
+      - key: VESTRA_STATE_DIR
+        value: /var/data/vestra
+      - key: ANCHOR_PROVIDER_URL
+        sync: false
+      - key: VESTRA_PUBLIC_ORIGIN
+        sync: false
+      - key: VESTRA_FAUCET_LIMIT
+        value: "30"

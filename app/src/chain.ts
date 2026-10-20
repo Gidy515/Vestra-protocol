@@ -1,3 +1,4 @@
+import { rpcTransport } from "./rpc-transport";
 import type { Wallet } from "./wallet";
 export type { Wallet } from "./wallet";
 export { localWallet, injectedWallet } from "./wallet";
@@ -42,6 +43,7 @@ export type Bootstrap = {
   idl: Idl;
   rpc: string;
   mockQuote: boolean;
+  hosted?: boolean;
 };
 export type Launch = {
   name: string;
@@ -125,7 +127,10 @@ export async function api<T>(
           },
     body: data === undefined ? undefined : JSON.stringify(data),
   });
-  const result = await response.json();
+  const text = await response.text();
+  let result;
+  try { result = JSON.parse(text); }
+  catch { throw new Error("Vestra service is unavailable. Keep the backend running and retry shortly."); }
   if (!response.ok)
     throw new Error(result.error || "Vestra service request failed");
   return result;
@@ -146,7 +151,7 @@ export class Chain {
         throw new Error("Invalid devnet configuration");
     } else if (boot.cluster !== "localnet" || !["127.0.0.1", "localhost"].includes(new URL(boot.rpc).hostname))
       throw new Error("Invalid localnet configuration");
-    this.connection = new Connection(boot.rpc, "confirmed");
+    this.connection = new Connection(boot.rpc, { commitment: "confirmed", disableRetryOnRateLimit: true, fetch: rpcTransport() });
     this.provider = new AnchorProvider(this.connection, wallet, {
       commitment: "confirmed",
     });
@@ -388,8 +393,15 @@ export class Chain {
       ),
     );
   }
+  private epochCache = new Map<string, any>();
+  private positionRows: { at: number; value: Promise<any[]> } | null = null;
   async positions(l: Launch): Promise<Position[]> {
-    const rows = await (this.program.account as any).lockPosition.all(),
+    if (!this.positionRows || Date.now() - this.positionRows.at > 2000) {
+      const value = (this.program.account as any).lockPosition.all();
+      this.positionRows = { at: Date.now(), value };
+      value.catch(() => { if (this.positionRows?.value === value) this.positionRows = null; });
+    }
+    const rows = await this.positionRows.value,
       state = await this.state(l),
       list: Position[] = [];
     for (const { publicKey, account: p } of rows) {
@@ -403,10 +415,19 @@ export class Chain {
         state.currentEpoch.toNumber(),
         p.endEpoch.toNumber(),
       );
+      const missing: number[] = [];
+      for (let i = p.nextClaimEpoch.toNumber(); i < end; i++)
+        if (!this.epochCache.has(`${l.address}:${i}`)) missing.push(i);
+      for (let offset = 0; offset < missing.length; offset += 50) {
+        const indices = missing.slice(offset, offset + 50);
+        const epochs = await (this.program.account as any).epoch.fetchMultiple(indices.map(i => this.epoch(pk(l.address), i)));
+        epochs.forEach((epoch: any, index: number) => {
+          if (epoch?.finalized) this.epochCache.set(`${l.address}:${indices[index]}`, epoch);
+        });
+      }
       for (let i = p.nextClaimEpoch.toNumber(); i < end; i++) {
-        const e = await (this.program.account as any).epoch.fetch(
-          this.epoch(pk(l.address), i),
-        );
+        const e = this.epochCache.get(`${l.address}:${i}`);
+        if (!e) throw new Error("Reward epoch data is unavailable. Please retry shortly.");
         reward += rewardForEpoch(
           e.rewards.toString(),
           p.weight.toString(),
@@ -637,7 +658,15 @@ export class Chain {
         ),
       );
     onStep("Saving launch metadata…");
+    let signature: string | undefined;
+    if (this.boot.hosted) {
+      if (!this.wallet.signMessage) throw new Error("This wallet must support message signing to name the launch");
+      const message = JSON.stringify({purpose: "Vestra launch metadata v1", genesis: this.boot.genesis, launch: launch.toBase58(), name: draft.name, symbol: draft.symbol, avatar: draft.avatar});
+      onStep("Approve the launch name in your wallet…");
+      signature = Array.from(await this.wallet.signMessage(new TextEncoder().encode(message)), n => n.toString(16).padStart(2, "0")).join("");
+    }
     await api("catalog", this.boot, {
+      signature,
       launch: launch.toBase58(),
       name: draft.name,
       symbol: draft.symbol,
