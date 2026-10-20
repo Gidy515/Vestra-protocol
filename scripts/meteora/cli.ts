@@ -1,3 +1,4 @@
+import { gidyIcon } from "../assets/gidy-icon";
 import { deriveDbcPoolAuthority, DynamicBondingCurveClient, CollectFeeMode, MigrationOption, SwapMode, deriveDbcPoolAddress, deriveDammV2PoolAddress, DAMM_V2_MIGRATION_FEE_ADDRESS } from '@meteora-ag/dynamic-bonding-curve-sdk';
 import { CpAmm, getUnClaimLpFee } from '@meteora-ag/cp-amm-sdk';
 import { createMint, mintTo, TOKEN_PROGRAM_ID, getAccount } from '@solana/spl-token';
@@ -184,10 +185,50 @@ async function audit(m:Manifest) {
   console.log({cluster:NETWORK.cluster,program:m.program,launch:m.launch,epochSeconds:s.epochSeconds.toString(),
     funded:s.totalReceived.toString(),platformPaid:s.totalPlatformPaid.toString(),lockerPaid:s.totalLockerPaid.toString(),rewards:rewards.toString(),principal:principal.toString(),reconciled:true});
 }
+// Dedicated presentation launch; the main environment and its keys stay intact.
+async function prepareGidy() {
+  if (NETWORK.cluster !== 'devnet') throw new Error('Gidy preparation requires devnet');
+  const original = await load(c);
+  if (!original.mockQuote) throw new Error('Gidy preparation requires test quote tokens');
+  const base = keyFile('gidy-base').key;
+  const m: Manifest = { ...original, base: base.publicKey.toBase58(),
+    creator:c.payer.publicKey.toBase58(), authority:c.payer.publicKey.toBase58(),
+    launch:c.client.launch(base.publicKey,c.payer.publicKey).toBase58(),
+    dbcPool:deriveDbcPoolAddress(pk(original.quote),base.publicKey,pk(original.config)).toBase58(),
+    dammPool:deriveDammV2PoolAddress(pk(original.dammConfig),base.publicKey,pk(original.quote)).toBase58() };
+  if (!await c.connection.getAccountInfo(pk(m.dbcPool))) await send(c,await dbc.creator.createPool({
+    name:'Gidy',symbol:'GID',uri:'',payer:c.payer.publicKey,poolCreator:c.payer.publicKey,
+    config:pk(m.config),baseMint:base.publicKey,
+  }),[base]);
+  if (!await c.connection.getAccountInfo(pk(m.launch))) await send(c,new Transaction().add(await c.program.methods.registerLaunch().accountsStrict({
+    authority:c.payer.publicKey,collector:pk(m.collector),baseMint:base.publicKey,quoteMint:pk(m.quote),treasury:pk(m.treasury),
+    launch:pk(m.launch),epoch:c.client.epoch(pk(m.launch),0),principalVault:c.client.principal(pk(m.launch)),
+    rewardVault:c.client.rewards(pk(m.launch)),tokenProgram:TOKEN_PROGRAM_ID,systemProgram:SystemProgram.programId,
+  }).instruction()));
+  const catalogFile = '.vestra/devnet/catalog.json';
+  const catalog = fs.existsSync(catalogFile) ? JSON.parse(fs.readFileSync(catalogFile,'utf8')) : {};
+  catalog[m.launch] = {name:'Gidy',symbol:'GID',avatar:gidyIcon};
+  fs.writeFileSync(catalogFile,JSON.stringify(catalog,null,2),{mode:0o600});
+  const target = await ata(c,pk(m.quote),c.payer.publicKey);
+  // Only the operator-controlled test mint is used; no stock asset is minted.
+  await mintTo(c.connection,c.payer,pk(m.quote),target,c.payer,1_000_000_000n);
+  for (let attempt=0;attempt<30;attempt++) {
+    const {pool,config} = await checked(m);
+    if (pool.poolState.isMigrated || pool.poolState.quoteReserve.gte(config.migrationQuoteThreshold)) break;
+    await trade(m,true,'5');
+  }
+  await graduate(m);
+  const migrated = await checked(m);
+  assert(migrated.pool.poolState.isMigrated,'Gidy graduation did not complete');
+  await trade(m,true,'1');
+  await collect(m);
+  console.log(JSON.stringify({name:'Gidy',symbol:'GID',launch:m.launch,pool:m.dbcPool,dammPool:m.dammPool,graduated:true},null,2));
+}
 async function main() {
   await verifyNetwork(c);
   const [command,input,nonce='0',tier='0']=process.argv.slice(2);
   if(command==='init') return init();
+  if(command==='prepare-gidy') return prepareGidy();
   if(command==='demo') {
     if(fs.existsSync(STATE_FILE)) throw new Error('Demo requires a fresh manifest; use individual commands to resume an existing launch');
     await init();

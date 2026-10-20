@@ -1,3 +1,4 @@
+import { rpcTransport } from "../../app/src/rpc-transport";
 import { EpochBacklogError, pendingEpochs } from '../epoch-catchup';
 import { EPOCHS_PER_TRANSACTION } from '../epoch-batch';
 import { recoverConfirmation } from '../confirmation';
@@ -45,7 +46,7 @@ export function context() {
     throw new Error('Set ANCHOR_WALLET to your dedicated devnet keypair');
   const walletPath = (process.env.ANCHOR_WALLET || path.join(os.homedir(), '.config/solana/id.json')).replace(/^~\//, os.homedir() + '/');
   const payer = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(walletPath, 'utf8'))));
-  const connection = new Connection(rpc, 'confirmed');
+  const connection = new Connection(rpc, { commitment: 'confirmed', disableRetryOnRateLimit: true, fetch: rpcTransport() });
   const provider = new anchor.AnchorProvider(connection, new anchor.Wallet(payer), { commitment: 'confirmed' });
   const program = loadProgram(provider);
   const client = new VestraClient(program);

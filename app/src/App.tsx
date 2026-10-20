@@ -1,3 +1,4 @@
+import { friendlyError, rateLimited } from "./network-errors";
 import { Stocks } from "./Stocks";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -38,12 +39,11 @@ import {
 const short = (s: string) => s.slice(0, 4) + "…" + s.slice(-4);
 const number = (n: number, digits = 4) =>
   new Intl.NumberFormat("en", { maximumFractionDigits: digits }).format(n);
-const prettyError = (e: unknown) =>
-  e instanceof Error ? e.message : String(e);
+const prettyError = friendlyError;
 import { localTokenLogo } from "./token-logo";
 
 function TokenLogo({value}: {value: string}) {
-  return value.startsWith("data:image/png;base64,") ? <img src={value} alt="" className="uploaded-token-logo" /> : <>{value}</>;
+  return /^data:image\/(png|jpeg|webp);base64,/.test(value) ? <img src={value} alt="" className="uploaded-token-logo" /> : <>{value}</>;
 }
 const avatars = ["✦", "◈", "◎", "✳", "↗"];
 type Activity = { signature: string; time: number };
@@ -131,6 +131,8 @@ export default function App() {
     [quoteBusy, setQuoteBusy] = useState(false);
   const [balances, setBalances] = useState({ base: "0", quote: "0", sol: 0 }),
     [positions, setPositions] = useState<Record<string, Position[]>>({});
+  const [positionsSnapshot, setPositionsSnapshot] = useState<Chain | null>(null);
+  const [positionsFailure, setPositionsFailure] = useState<{ chain: Chain; message: string } | null>(null);
   const [name, setName] = useState(""),
     [symbol, setSymbol] = useState(""),
     [avatar, setAvatar] = useState("✦"),
@@ -139,6 +141,7 @@ export default function App() {
   const [activity, setActivity] = useState<Activity[]>([]),
     [history, setHistory] = useState<Record<string, number[]>>({}),
     [now, setNow] = useState(Date.now() / 1000);
+  const refreshBackoff = useRef({ until: 0, attempts: 0 });
   const walletIntent = useRef(0);
   const clockOffset = useRef(0),
     refreshing = useRef(false);
@@ -152,9 +155,11 @@ export default function App() {
   );
   const chainRef = useRef(chain);
   chainRef.current = chain;
+  const positionsReady = !!chain && positionsSnapshot === chain;
+  const positionsError = positionsFailure?.chain === chain ? positionsFailure.message : "";
   const current = data.launches.find((l) => l.address === selected) || null;
   const refresh = useCallback(async () => {
-    if (refreshing.current) return;
+    if (refreshing.current || Date.now() < refreshBackoff.current.until) return;
     refreshing.current = true;
     try {
       const result = await api<Data>("launches");
@@ -174,12 +179,20 @@ export default function App() {
           list[l.address] = await chain.positions(l);
         if (chainRef.current !== chain) return;
         setPositions(list);
+        setPositionsSnapshot(chain);
+        setPositionsFailure(null);
         const chosen =
           result.launches.find((l) => l.address === selected) ||
           result.launches[0];
         if (chosen) setBalances(await chain.balances(chosen));
       }
+      refreshBackoff.current = { until: 0, attempts: 0 };
     } catch (e) {
+      if (rateLimited(e)) {
+        const attempts = refreshBackoff.current.attempts + 1;
+        refreshBackoff.current = { attempts, until: Date.now() + Math.min(60_000, 5000 * 2 ** Math.min(attempts, 4)) };
+      }
+      if (chain && chainRef.current === chain) setPositionsFailure({ chain, message: prettyError(e) });
       setLoadError(prettyError(e));
     } finally {
       setLoading(false);
@@ -564,22 +577,30 @@ export default function App() {
             </button>
           </div>
         )}
-        {!!data.keeper.pendingEpochs && (
-          <div className="notice">
-            <strong>Updating reward epochs</strong>
-            <p>{data.keeper.pendingEpochs} epochs remain across launches. The keeper continues automatically.</p>
-            <small>After downtime, each elapsed epoch must be reconciled in order. New locks wait for catch-up; finalized rewards remain claimable.</small>
-          </div>
-        )}
-        {data.keeper.error && (
-          <div className="notice">
-            <strong>Keeper needs attention</strong>
-            <p>{data.keeper.error}</p>
-            <small>
-              The keeper will retry automatically. Check the service logs for RPC or test SOL funding errors. Trading and principal withdrawals have separate on-chain checks.
-            </small>
-          </div>
-        )}
+        {(!!data.keeper.pendingEpochs || !!data.keeper.error) && (() => {
+          const sync = data.keeper.pendingEpochs
+            ? `${data.keeper.pendingEpochs} reward ${data.keeper.pendingEpochs === 1 ? "epoch" : "epochs"} syncing automatically`
+            : "Reward epochs are up to date";
+          const messages = data.keeper.error
+            ? [`Keeper: ${prettyError(data.keeper.error)}`, sync,
+              "Keeper will retry automatically · Check service logs if the issue persists"]
+            : [sync, "Finalized rewards remain claimable",
+              "New locks become available when their launch is synced"];
+          return (
+            <div className="epoch-ticker" role="status">
+              <span className="epoch-ticker-label"><span className={`epoch-ticker-dot${data.keeper.error ? " needs-attention" : ""}`} />Reward sync</span>
+              <span className="epoch-ticker-accessible">{messages.join(". ")}</span>
+              <div className="epoch-ticker-window" aria-hidden="true">
+                <div className="epoch-ticker-track">
+                  {[...messages, messages[0]].map((message, index) => (
+                    <span key={index} title={message} className={data.keeper.error && (index === 0 || index === 3) ? "epoch-ticker-error" : undefined}>{message}</span>
+                  ))}
+                </div>
+              </div>
+              {data.keeper.error && <details className="epoch-ticker-details"><summary>Details</summary><p>{data.keeper.error}</p><small>The keeper retries automatically. Trading and principal withdrawals have separate on-chain checks.</small></details>}
+            </div>
+          );
+        })()}
         {view === "stocks" ? <Stocks /> : view === "positions" ? (
           <>
             <div className="page-heading">
@@ -591,7 +612,7 @@ export default function App() {
               <div className="reward-summary">
                 <small>Claimable across your positions</small>
                 <strong>
-                  {units(claimable)} <span>mSTOCK</span>
+                  {positionsReady ? units(claimable) : "—"} <span>mSTOCK</span>
                 </strong>
               </div>
             </div>
@@ -605,6 +626,18 @@ export default function App() {
                 <button className="button" onClick={() => setModal("wallet")}>
                   Connect wallet
                 </button>
+              </div>
+            ) : !positionsReady ? (
+              <div className="empty" role="status" aria-busy={!positionsError}>
+                {positionsError ? <>
+                  <h2>Couldn’t load your locks.</h2>
+                  <p>{positionsError}</p>
+                  <button className="button" onClick={() => void refresh()}>Retry</button>
+                </> : <>
+                  <span className="positions-spinner" aria-hidden="true" />
+                  <h2>Loading your locks</h2>
+                  <p>Checking your positions and claimable rewards.</p>
+                </>}
               </div>
             ) : portfolio.length ? (
               <div className="positions">
@@ -763,11 +796,21 @@ export default function App() {
                 <div className="section-heading">
                   <h2>Your positions</h2>
                   <span>
-                    {(positions[current.address] || []).length} positions
+                    {positionsReady ? `${(positions[current.address] || []).length} positions` : "Loading…"}
                   </span>
                 </div>
                 {wallet ? (
-                  (positions[current.address] || []).length ? (
+                  !positionsReady ? (
+                    <div className="empty small-empty" role="status" aria-busy={!positionsError}>
+                      {positionsError ? <>
+                        <p>Couldn’t load your locks.</p>
+                        <button className="text-button" onClick={() => void refresh()}>Retry</button>
+                      </> : <>
+                        <span className="positions-spinner" aria-hidden="true" />
+                        <p>Loading your locks…</p>
+                      </>}
+                    </div>
+                  ) : (positions[current.address] || []).length ? (
                     <div className="positions">
                       {(positions[current.address] || []).map((p) =>
                         positionCard(current, p),
