@@ -1,5 +1,6 @@
+import {buildEpochBatch, EPOCHS_PER_TRANSACTION} from "./epoch-batch";
 import * as anchor from "@anchor-lang/core";
-import { PublicKey, SystemProgram, TransactionInstruction } from "@solana/web3.js";
+import { PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import fs from "node:fs";
 import path from "node:path";
@@ -57,6 +58,16 @@ export class VestraClient {
       // Another keeper may have created exactly this PDA. Otherwise propagate.
       if (!(await connection.getAccountInfo(epoch))) throw error;
     }
+  }
+  async epochBatch(launch: PublicKey, start: number, count: number, payer: PublicKey, quoteMint: PublicKey, treasury: PublicKey): Promise<Transaction> {
+    if (!Number.isInteger(count) || count < 1 || count > EPOCHS_PER_TRANSACTION) throw new Error("Invalid epoch batch size");
+    const accounts = await this.program.provider.connection.getMultipleAccountsInfo(
+      Array.from({length: count}, (_, i) => this.epoch(launch, start + i + 1)), "confirmed",
+    );
+    return buildEpochBatch(start, count, accounts.map(Boolean), async index =>
+      this.program.methods.createEpoch(bn(index)).accountsStrict({
+        payer, launch, epoch: this.epoch(launch, index), systemProgram: SystemProgram.programId,
+      }).instruction(), index => this.finalizeIx(launch, index, quoteMint, treasury));
   }
   async finalizeIx(launch: PublicKey, index: number, quoteMint: PublicKey, treasury: PublicKey): Promise<TransactionInstruction> {
     return this.program.methods.finalizeEpoch().accountsStrict({
