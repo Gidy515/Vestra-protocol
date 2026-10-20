@@ -14,7 +14,7 @@ export function network(env: NodeJS.ProcessEnv = process.env) {
   const browserUrl = new URL(browserRpc);
   if (browserUrl.username || browserUrl.password || browserUrl.search || browserUrl.hash) throw new Error("Browser RPC must be public and credential-free");
   if (cluster === "devnet" && browserUrl.protocol !== "https:") throw new Error("Browser devnet RPC requires HTTPS");
-  return { cluster: cluster as Cluster, rpc, browserRpc, stateDir: path.resolve(cluster === "devnet" ? ".vestra/devnet" : ".vestra") };
+  return { cluster: cluster as Cluster, rpc, browserRpc, stateDir: path.resolve(env.VESTRA_STATE_DIR || (cluster === "devnet" ? ".vestra/devnet" : ".vestra")) };
 }
 export function assertGenesis(cluster: Cluster, genesis: string) {
   if (cluster === "devnet" && genesis !== DEVNET_GENESIS) throw new Error("RPC is not Solana devnet; refusing transactions");

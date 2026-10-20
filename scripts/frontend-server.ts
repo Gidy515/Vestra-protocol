@@ -1,3 +1,6 @@
+import { publicOrigin, allowedPublicRequest, metadataMessage, verifyMetadata, reservePublicFunding } from "./hosting-policy";
+import { friendlyError } from "../app/src/network-errors";
+import { rateLimited } from "../app/src/network-errors";
 import http from "node:http";
 import { stockMarket } from "./stock-market";
 import { EpochBacklogError, pendingEpochs } from "./epoch-catchup";
@@ -18,6 +21,7 @@ import {
   getMint,
   getOrCreateAssociatedTokenAccount,
   transfer,
+  mintTo,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import {
@@ -40,6 +44,15 @@ import {
 } from "./meteora/runtime";
 
 async function main() {
+  const hosted = publicOrigin(process.env.VESTRA_PUBLIC_ORIGIN);
+  const backend = publicOrigin(process.env.VESTRA_BACKEND_ORIGIN || process.env.RENDER_EXTERNAL_URL);
+  if (hosted && NETWORK.cluster !== "devnet") throw new Error("Public hosting requires devnet");
+  if (hosted && !backend) throw new Error("Set the managed backend HTTPS origin");
+  if (backend && !hosted) throw new Error("Set VESTRA_PUBLIC_ORIGIN to your Vercel origin");
+  const faucetLimit = Number(process.env.VESTRA_FAUCET_LIMIT || 30);
+  if (!Number.isSafeInteger(faucetLimit) || faucetLimit < 0 || faucetLimit > 100) throw new Error("Invalid SOL funding budget");
+  let faucetBusy = false;
+
   const c = context(),
     dbc = new DynamicBondingCurveClient(c.connection, "confirmed"),
     amm = new CpAmm(c.connection);
@@ -67,7 +80,6 @@ async function main() {
   let keeperBusy = false,
     keeperError = "",
     lastKeeper = 0;
-  const faucetCounts = new Map<string, number>();
   const validHosts = new Set([
     "127.0.0.1:8787",
     "localhost:8787",
@@ -250,8 +262,9 @@ async function main() {
       }
     }
   }
+  let keeperRetryAt = 0, keeperFailures = 0;
   async function keeper() {
-    if (keeperBusy) return;
+    if (keeperBusy || Date.now() < keeperRetryAt) return;
     keeperBusy = true;
     try {
       const errors: string[] = [];
@@ -268,13 +281,18 @@ async function main() {
       keeperError = e instanceof Error ? e.message : String(e);
       console.error("Keeper:", keeperError);
     } finally {
+      if (rateLimited(keeperError)) {
+        keeperFailures++;
+        keeperRetryAt = Date.now() + Math.min(120_000, 10_000 * 2 ** Math.min(keeperFailures, 4));
+      } else { keeperFailures = 0; keeperRetryAt = 0; }
       keeperBusy = false;
     }
   }
   const server = http.createServer(async (req, res) => {
     try {
+      if (req.method === "GET" && req.url === "/healthz") return json(res, {ok: true});
       if (
-        !allowedLocalRequest(
+        !(hosted ? allowedPublicRequest(hosted, req.headers.host || "", req.headers.origin, req.method || "GET", backend!.host) : allowedLocalRequest(
           req.headers.host || "",
           req.headers.origin,
           req.method || "GET",
@@ -282,7 +300,7 @@ async function main() {
             ? req.headers["x-vestra-session"]
             : undefined,
           session,
-        )
+        ))
       )
         return json(
           res,
@@ -290,6 +308,10 @@ async function main() {
           403,
         );
       const url = new URL(req.url || "/", "http://127.0.0.1:8787");
+      if (req.method === "GET" && url.pathname === "/api/health") return json(res, {
+        ok: true, cluster: NETWORK.cluster,
+        keeper: { busy:keeperBusy, lastRun:lastKeeper, retryAt:keeperRetryAt, hasError:!!keeperError },
+      });
       if (req.method === "POST" && req.headers["x-vestra-session"] !== session)
         return json(res, { error: "Invalid session" }, 403);
       if (req.method === "GET" && url.pathname === "/api/stocks") return json(res, await stocks());
@@ -308,13 +330,14 @@ async function main() {
           rpc: NETWORK.browserRpc,
           cluster: NETWORK.cluster,
           mockQuote: original.mockQuote,
+          hosted: Boolean(hosted),
         });
       if (req.method === "GET" && url.pathname === "/api/launches") {
         const launches = (await discover()).map(x => x.public);
         const time = await chainTime(c);
         return json(res, {
           launches,
-          keeper: { busy: keeperBusy, error: keeperError, lastRun: lastKeeper,
+          keeper: { busy: keeperBusy, error: hosted && keeperError ? (friendlyError(keeperError) === keeperError ? "Keeper retry pending. Check the service logs." : friendlyError(keeperError)) : keeperError, lastRun: lastKeeper,
             pendingEpochs: launches.reduce((sum, l) => sum + pendingEpochs(l.origin, l.epochSeconds, l.currentEpoch, time), 0) },
         });
       }
@@ -324,6 +347,8 @@ async function main() {
           (x) => x.public.address === b.launch,
         );
         if (!item) throw new Error("Launch not registered with this collector");
+        if (hosted && !verifyMetadata(pk(item.public.creator).toBytes(), metadataMessage(original.genesis, b.launch, b.name, b.symbol, b.avatar), b.signature))
+          throw new Error("Launch creator signature required for metadata");
         if (catalog[b.launch]) {
           if (
             catalog[b.launch].name === b.name &&
@@ -346,9 +371,10 @@ async function main() {
           symbol: b.symbol,
           avatar: b.avatar,
         };
-        fs.writeFileSync(catalogFile, JSON.stringify(catalog, null, 2), {
+        fs.writeFileSync(catalogFile + ".tmp", JSON.stringify(catalog, null, 2), {
           mode: 0o600,
         });
+        fs.renameSync(catalogFile + ".tmp", catalogFile);
         return json(res, { ok: true });
       }
       if (req.method === "POST" && url.pathname === "/api/faucet") {
@@ -357,19 +383,23 @@ async function main() {
           key = owner.toBase58();
         if (!PublicKey.isOnCurve(owner.toBytes()))
           throw new Error("Wallet must be on curve");
-        if ((faucetCounts.get(key) || 0) >= 3)
-          throw new Error(
-            "Test token limit reached for this wallet",
-          );
-        faucetCounts.set(key, (faucetCounts.get(key) || 0) + 1);
-        const sol = NETWORK.cluster === "devnet"
-          ? await send(c, new Transaction().add(SystemProgram.transfer({
-              fromPubkey: c.payer.publicKey, toPubkey: owner, lamports: 20_000_000,
-            })))
-          : await c.connection.requestAirdrop(owner, 2_000_000_000);
+        if (faucetBusy) return json(res, {error:"Test token funding is busy. Retry shortly."}, 429);
+        faucetBusy = true;
+        try {
+        let sol: string | null = null;
+        // Test-token claims remain unlimited. SOL is a separate bounded top-up.
+        if (NETWORK.cluster === "devnet") {
+          const balance = await c.connection.getBalance(owner);
+          if (balance < 10_000_000) {
+            const approved = !hosted || reservePublicFunding(path.join(STATE_DIR, "faucet-ledger.json"), key, faucetLimit);
+            if (approved) sol = await send(c, new Transaction().add(SystemProgram.transfer({
+              fromPubkey:c.payer.publicKey, toPubkey:owner, lamports:20_000_000,
+            })));
+          }
+        } else sol = await c.connection.requestAirdrop(owner, 2_000_000_000);
         if (NETWORK.cluster === "localnet") {
           // Airdrop has no caller-provided blockhash; confirm its actual signature.
-          const result = await c.connection.confirmTransaction(sol, "confirmed");
+          const result = await c.connection.confirmTransaction(sol!, "confirmed");
           if (result.value.err) throw new Error("Local airdrop failed");
         }
         const destination = await getOrCreateAssociatedTokenAccount(
@@ -378,14 +408,12 @@ async function main() {
           pk(original.quote),
           owner,
         );
-        const source = await ata(c, pk(original.quote), c.payer.publicKey);
-        const signature = await transfer(
-          c.connection,
-          c.payer,
-          source,
-          destination.address,
-          c.payer,
-          100_000_000n,
+        if (!original.mockQuote) throw new Error("Test faucet requires a test quote mint");
+        const mint = await getMint(c.connection, pk(original.quote));
+        if (!mint.mintAuthority?.equals(c.payer.publicKey)) throw new Error("Test quote mint authority mismatch");
+        const signature = await mintTo(
+          c.connection, c.payer, pk(original.quote), destination.address,
+          c.payer, 100_000_000n,
         );
         return json(res, {
           signature,
@@ -393,6 +421,7 @@ async function main() {
           quote: "100",
           label: NETWORK.cluster === "devnet" ? "Devnet test assets only" : "Local mock assets only",
         });
+        } finally { faucetBusy = false; }
       }
       if (req.method === "POST" && url.pathname === "/api/keeper") {
         void keeper();
@@ -400,12 +429,15 @@ async function main() {
       }
       return json(res, { error: "Not found" }, 404);
     } catch (e) {
-      json(res, { error: e instanceof Error ? e.message : String(e) }, 400);
+      if (hosted) console.error("API request failed:", e);
+      json(res, { error: hosted ? (friendlyError(e) === (e instanceof Error ? e.message : String(e)) ? "Request could not complete. Retry shortly or check the service logs." : friendlyError(e)) : e instanceof Error ? e.message : String(e) }, rateLimited(e) ? 429 : 400);
     }
   });
-  server.listen(8787, "127.0.0.1", () => {
+  const port = Number(process.env.PORT || 8787);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid PORT");
+  server.listen(port, hosted ? "0.0.0.0" : "127.0.0.1", () => {
     console.log(
-      `Vestra ${NETWORK.cluster} service: http://127.0.0.1:8787 (collector keys remain on disk)`,
+      `Vestra ${NETWORK.cluster} service: ${backend?.origin || "http://127.0.0.1:" + port} (collector keys remain on disk)`,
     );
     void keeper();
   });

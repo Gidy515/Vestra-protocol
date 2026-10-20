@@ -12,3 +12,7 @@ meteora-integration.patch
 
 app/dist/
 app/.env.local
+
+.env.*
+!.env.example
+*bootstrap*.json
