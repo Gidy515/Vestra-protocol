@@ -1,3 +1,4 @@
+import { Stocks } from "./Stocks";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDownUp,
@@ -39,11 +40,16 @@ const number = (n: number, digits = 4) =>
   new Intl.NumberFormat("en", { maximumFractionDigits: digits }).format(n);
 const prettyError = (e: unknown) =>
   e instanceof Error ? e.message : String(e);
+import { localTokenLogo } from "./token-logo";
+
+function TokenLogo({value}: {value: string}) {
+  return value.startsWith("data:image/png;base64,") ? <img src={value} alt="" className="uploaded-token-logo" /> : <>{value}</>;
+}
 const avatars = ["✦", "◈", "◎", "✳", "↗"];
 type Activity = { signature: string; time: number };
 type Data = {
   launches: Launch[];
-  keeper: { busy: boolean; error: string; lastRun: number };
+  keeper: { busy: boolean; error: string; lastRun: number; pendingEpochs?: number };
 };
 function Sparkline({ values }: { values: number[] }) {
   if (values.length < 2)
@@ -103,7 +109,7 @@ export default function App() {
   const [loadError, setLoadError] = useState(""),
     [loading, setLoading] = useState(true),
     [wallet, setWallet] = useState<Wallet | null>(null);
-  const [view, setView] = useState<"explore" | "positions">("explore"),
+  const [view, setView] = useState<"explore" | "positions" | "stocks">("explore"),
     [selected, setSelected] = useState(
       new URLSearchParams(location.search).get("launch") || "",
     );
@@ -129,9 +135,11 @@ export default function App() {
     [symbol, setSymbol] = useState(""),
     [avatar, setAvatar] = useState("✦"),
     [launchStep, setLaunchStep] = useState("");
+  const [logoBusy, setLogoBusy] = useState(false);
   const [activity, setActivity] = useState<Activity[]>([]),
     [history, setHistory] = useState<Record<string, number[]>>({}),
     [now, setNow] = useState(Date.now() / 1000);
+  const walletIntent = useRef(0);
   const clockOffset = useRef(0),
     refreshing = useRef(false);
   const show = (text: string, error = false) => setToast({ text, error });
@@ -186,6 +194,20 @@ export default function App() {
         setLoading(false);
       });
   }, []);
+  useEffect(() => {
+    if (!boot) return;
+    let cancelled = false;
+    const intent = walletIntent.current;
+    const kind = localStorage.getItem("vestra-wallet-choice");
+    const restore = kind === "Phantom" || kind === "Solflare"
+      ? injectedWallet(kind, true)
+      : kind === "Local test" && boot.cluster === "localnet"
+        ? Promise.resolve(localWallet()) : null;
+    restore?.then(value => {if (!cancelled && walletIntent.current === intent) setWallet(value);}).catch(() => {
+      // Locked/revoked wallets require an explicit user connection; never prompt on refresh.
+    });
+    return () => {cancelled = true;};
+  }, [boot]);
   useEffect(() => {
     void refresh();
     const id = setInterval(() => void refresh(), boot?.cluster === "devnet" ? 15000 : 8000);
@@ -257,7 +279,10 @@ export default function App() {
   useEffect(
     () =>
       wallet?.subscribe?.((key) =>
-        setWallet(key ? { ...wallet, publicKey: key } : null),
+        (() => {
+          if (!key) {walletIntent.current++;localStorage.removeItem("vestra-wallet-choice");}
+          setWallet(key ? { ...wallet, publicKey: key } : null);
+        })(),
       ),
     [wallet],
   );
@@ -322,12 +347,14 @@ export default function App() {
       setBusy("");
     }
   }
-  async function connect(kind: "Phantom" | "Solflare" | "Local demo") {
-    if (kind === "Local demo" && boot?.cluster === "devnet") { show("Use Phantom or Solflare on devnet"); return; }
+  async function connect(kind: "Phantom" | "Solflare" | "Local test") {
+    if (kind === "Local test" && boot?.cluster === "devnet") { show("Use Phantom or Solflare on devnet"); return; }
+    walletIntent.current++;
     await action("Wallet connection", async () => {
       setWallet(
-        kind === "Local demo" ? localWallet() : await injectedWallet(kind),
+        kind === "Local test" ? localWallet() : await injectedWallet(kind),
       );
+      localStorage.setItem("vestra-wallet-choice", kind);
       setModal(null);
     });
   }
@@ -370,7 +397,7 @@ export default function App() {
     return (
       <article className="position-card" key={p.address}>
         <div className="position-head">
-          <div className="token-icon small">{l.avatar}</div>
+          <div className="token-icon small"><TokenLogo value={l.avatar} /></div>
           <div>
             <strong>{l.name}</strong>
             <span>
@@ -468,6 +495,7 @@ export default function App() {
             >
               My locks
             </button>
+            <button className={view === "stocks" ? "active" : ""} onClick={() => {setView("stocks");setSelected("");historyPush("");}}>Stocks</button>
             <a href="#how-it-works" onClick={() => select(null)}>
               How it works
             </a>
@@ -497,7 +525,7 @@ export default function App() {
       </header>
       <div className="demo-strip">
         <span>
-          <ShieldCheck size={13} /> {boot?.cluster === "devnet" ? "DEVNET DEMO" : "LOCAL DEMO"}
+          <ShieldCheck size={13} /> {boot?.cluster === "devnet" ? "DEVNET" : "LOCALNET"}
         </span>
         <p>
           mSTOCK is a mock quote asset. Rewards come from actual collected
@@ -507,13 +535,13 @@ export default function App() {
           <button
             disabled={!!busy}
             onClick={() =>
-              void action("Demo funding", () =>
+              void action("Test token funding", () =>
                 api("faucet", boot, { wallet: wallet.publicKey.toBase58() }),
               )
             }
           >
             <Gift size={13} />
-            Get demo funds
+            Get test tokens
           </button>
         )}
       </div>
@@ -527,8 +555,8 @@ export default function App() {
             </strong>
             <p>{loadError}</p>
             <small>
-              Keep your validator running, then run{" "}
-              <code>npm run app:service</code> in the repository root.
+              Keep the API service running. For localnet also start the validator, then run{" "}
+              <code>{boot?.cluster === "devnet" ? "npm run devnet:service" : "npm run app:service"}</code> in the repository root.
             </small>
             <button onClick={() => (boot ? void refresh() : location.reload())}>
               <RefreshCw size={14} />
@@ -536,17 +564,23 @@ export default function App() {
             </button>
           </div>
         )}
+        {!!data.keeper.pendingEpochs && (
+          <div className="notice">
+            <strong>Updating reward epochs</strong>
+            <p>{data.keeper.pendingEpochs} epochs remain across launches. The keeper continues automatically.</p>
+            <small>After downtime, each elapsed epoch must be reconciled in order. New locks wait for catch-up; finalized rewards remain claimable.</small>
+          </div>
+        )}
         {data.keeper.error && (
           <div className="notice">
             <strong>Keeper needs attention</strong>
             <p>{data.keeper.error}</p>
             <small>
-              Trading may still be available; locks and claims need current
-              epochs.
+              The keeper will retry automatically. Check the service logs for RPC or test SOL funding errors. Trading and principal withdrawals have separate on-chain checks.
             </small>
           </div>
         )}
-        {view === "positions" ? (
+        {view === "stocks" ? <Stocks /> : view === "positions" ? (
           <>
             <div className="page-heading">
               <div>
@@ -602,7 +636,7 @@ export default function App() {
               All launches
             </button>
             <div className="detail-heading">
-              <div className="token-icon large">{current.avatar}</div>
+              <div className="token-icon large"><TokenLogo value={current.avatar} /></div>
               <div>
                 <h1>
                   {current.name}
@@ -981,8 +1015,8 @@ export default function App() {
                       <p className="micro">
                         Locks cannot be cancelled.{" "}
                         {current.epochSeconds === 10
-                          ? "Demo uses 10-second epochs."
-                          : current.epochSeconds === 60 ? "Devnet demo uses 60-second epochs." : "Production uses daily epochs."}{" "}
+                          ? "Localnet uses 10-second epochs."
+                          : current.epochSeconds === 60 ? "Devnet uses 60-second epochs." : "Production uses daily epochs."}{" "}
                         Rewards vary with funded fees; no guaranteed yield.
                       </p>
                     </>
@@ -1173,7 +1207,7 @@ export default function App() {
                     >
                       <div className="card-top">
                         <div className={`token-icon color-${i % 4}`}>
-                          {l.avatar}
+                          <TokenLogo value={l.avatar} />
                         </div>
                         <span
                           className={`badge ${l.migrated ? "mint" : "purple"}`}
@@ -1408,6 +1442,8 @@ export default function App() {
                       disabled={!!busy}
                       onClick={() =>
                         void action("Wallet disconnection", async () => {
+                          walletIntent.current++;
+                          localStorage.removeItem("vestra-wallet-choice");
                           await wallet.disconnect?.();
                           setWallet(null);
                           setModal(null);
@@ -1437,13 +1473,13 @@ export default function App() {
                     </button>
                     <button
                       disabled={!!busy || !boot || boot.cluster === "devnet"}
-                      onClick={() => void connect("Local demo")}
+                      onClick={() => void connect("Local test")}
                     >
                       <span className="wallet-symbol local">
                         <Layers3 size={20} />
                       </span>
                       <div>
-                        <strong>Local demo wallet</strong>
+                        <strong>Local test wallet</strong>
                         <small>{boot?.cluster === "devnet" ? "Localnet only — use Phantom or Solflare" : "No extension needed"}</small>
                       </div>
                       <ArrowRight size={16} />
@@ -1451,7 +1487,7 @@ export default function App() {
                   </div>
                 )}
                 <p className="micro">
-                  The demo wallet is generated in this browser and retained for
+                  The local test wallet is generated in this browser and retained for
                   this tab’s session. Never send real assets to it. Extensions
                   must support the selected network. For devnet, select Devnet in your wallet settings.
                 </p>
@@ -1510,6 +1546,16 @@ export default function App() {
                   </label>
                   <label className="field">
                     Token icon
+                    <input type="file" accept="image/png,image/jpeg,image/webp" disabled={!!busy || logoBusy}
+                      onChange={async event => {
+                        const file = event.target.files?.[0];
+                        event.target.value = "";
+                        if (!file) return;
+                        setLogoBusy(true);
+                        try {setAvatar(await localTokenLogo(file));} catch (error) {show(prettyError(error), true);} finally {setLogoBusy(false);}
+                      }} />
+                    <span className="micro">Upload PNG, JPEG or WebP (up to 5 MB). Images are cropped to a square.</span>
+                    <div className="token-icon large"><TokenLogo value={avatar} /></div>
                     <div className="avatar-options">
                       {avatars.map((a) => (
                         <button
@@ -1526,7 +1572,8 @@ export default function App() {
                   <div className="launch-config">
                     <div>
                       <span>Quote asset</span>
-                      <strong>mSTOCK · mock asset</strong>
+                      <strong>mSTOCK · test asset</strong>
+                      <small>Stock pairs require a verified compatible devnet mint and a matching launch config. None is configured yet.</small>
                     </div>
                     <div>
                       <span>Token supply</span>
@@ -1553,7 +1600,7 @@ export default function App() {
                   <button
                     type="submit"
                     className="button full"
-                    disabled={!!busy || !chain}
+                    disabled={!!busy || !chain || logoBusy}
                   >
                     {busy ? launchStep || busy : "Create launch"}
                     <ArrowRight size={16} />

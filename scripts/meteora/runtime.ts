@@ -1,3 +1,6 @@
+import { EpochBacklogError, pendingEpochs } from '../epoch-catchup';
+import { EPOCHS_PER_TRANSACTION } from '../epoch-batch';
+import { recoverConfirmation } from '../confirmation';
 import * as anchor from '@anchor-lang/core';
 import {
   Connection, Keypair, PublicKey, Transaction, ComputeBudgetProgram, Signer,
@@ -63,7 +66,25 @@ export async function send(c: Runtime, tx: Transaction, signers: Signer[] = []):
   await verifyNetwork(c);
   const alreadyBudget = tx.instructions.some(ix => ix.programId.equals(ComputeBudgetProgram.programId));
   if (!alreadyBudget) tx.instructions.unshift(ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 }));
-  const signature = await c.provider.sendAndConfirm(tx, signers);
+  // Anchor 1.1.2 otherwise uses signature-only confirmation (30-second timeout).
+  // Bind confirmation to the exact blockhash/expiry used to sign this transaction.
+  const blockhash = await c.connection.getLatestBlockhash('confirmed');
+  tx.recentBlockhash = blockhash.blockhash;
+  let signature: string;
+  try {
+    signature = await c.provider.sendAndConfirm(tx, signers, {
+      ...c.provider.opts, commitment: 'confirmed', preflightCommitment: 'confirmed',
+      blockhash, maxRetries: 3,
+    });
+  } catch (error) {
+    const reported = (error as {signature?: unknown})?.signature;
+    const candidate = typeof reported === 'string' ? reported
+      : tx.signature ? anchor.utils.bytes.bs58.encode(tx.signature) : undefined;
+    if (!candidate || !await recoverConfirmation(candidate, async sig =>
+      (await c.connection.getSignatureStatuses([sig], {searchTransactionHistory:true})).value[0])) throw error;
+    signature = candidate;
+    console.log('Recovered confirmed transaction after RPC error:', signature);
+  }
   console.log('Confirmed:', signature);
   return signature;
 }
@@ -83,14 +104,22 @@ export async function chainTime(c: Runtime): Promise<number> {
   if (time === null) throw new Error('RPC did not return chain time');
   return time;
 }
-export async function catchUp(c: Runtime, m: Manifest): Promise<number> {
+export async function catchUp(c: Runtime, m: Manifest, budget = 200): Promise<number> {
   const launch = pk(m.launch);
-  for (let attempts = 0; attempts < 200; attempts++) {
+  let processed = 0;
+  while (processed < budget) {
     const s = await c.client.launchState(launch);
     const index = s.currentEpoch.toNumber();
-    if (await chainTime(c) < s.origin.toNumber() + (index + 1) * s.epochSeconds.toNumber()) return index;
-    await c.client.ensureEpoch(launch, index + 1, c.payer.publicKey);
-    await send(c, new Transaction().add(await c.client.finalizeIx(launch, index, pk(m.quote), pk(m.treasury))));
+    const remaining = pendingEpochs(s.origin.toNumber(), s.epochSeconds.toNumber(), index, await chainTime(c));
+    if (!remaining) return index;
+    const count = Math.min(remaining, EPOCHS_PER_TRANSACTION, budget - processed);
+    const tx = await c.client.epochBatch(launch, index, count, c.payer.publicKey, pk(m.quote), pk(m.treasury));
+    await send(c, tx);
+    processed += count;
   }
-  throw new Error('Catch-up limit reached; rerun keeper to continue');
+  const s = await c.client.launchState(launch);
+  const index = s.currentEpoch.toNumber();
+  const remaining = pendingEpochs(s.origin.toNumber(), s.epochSeconds.toNumber(), index, await chainTime(c));
+  if (remaining) throw new EpochBacklogError(remaining);
+  return index;
 }

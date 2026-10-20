@@ -1,4 +1,7 @@
 import http from "node:http";
+import { stockMarket } from "./stock-market";
+import { EpochBacklogError, pendingEpochs } from "./epoch-catchup";
+import { validAvatar } from "./catalog-logo";
 import { allowedLocalRequest } from "./frontend-policy";
 import fs from "node:fs";
 import path from "node:path";
@@ -41,6 +44,7 @@ async function main() {
     dbc = new DynamicBondingCurveClient(c.connection, "confirmed"),
     amm = new CpAmm(c.connection);
   const original = await load(c);
+  const stocks = stockMarket();
   const browserGenesis = await new Connection(NETWORK.browserRpc, "confirmed").getGenesisHash();
   if (browserGenesis !== original.genesis) throw new Error("Browser and server RPCs point to different networks");
   const session = randomBytes(32).toString("hex");
@@ -50,8 +54,8 @@ async function main() {
     ? JSON.parse(fs.readFileSync(catalogFile, "utf8"))
     : {};
   catalog[original.launch] ??= {
-    name: "Vestra Demo",
-    symbol: "VESTDEMO",
+    name: "Vestra Launch",
+    symbol: "VEST",
     avatar: "✦",
   };
   const MAX = bn("18446744073709551615");
@@ -81,7 +85,7 @@ async function main() {
     let text = "";
     for await (const chunk of req) {
       text += chunk;
-      if (text.length > 8192) throw new Error("Request too large");
+      if (text.length > 110_000) throw new Error("Request too large");
     }
     return JSON.parse(text || "{}");
   }
@@ -179,7 +183,7 @@ async function main() {
         "Collector ATA has unrelated tokens; inspect it before collection",
       );
     async function ingest(tx: Transaction) {
-      const index = await catchUp(c, m);
+      const index = await catchUp(c, m, 8);
       tx.add(
         await c.program.methods
           .fundCollectedBalance()
@@ -196,7 +200,7 @@ async function main() {
       );
       await send(c, tx, [collector]);
     }
-    await catchUp(c, m);
+    await catchUp(c, m, 8);
     const fees = await dbc.state.getPoolFeeMetrics(pk(m.dbcPool));
     if (!fees.current.partnerQuoteFee.isZero())
       await ingest(
@@ -250,8 +254,15 @@ async function main() {
     if (keeperBusy) return;
     keeperBusy = true;
     try {
-      for (const item of await discover()) await collect(item.m);
-      keeperError = "";
+      const errors: string[] = [];
+      for (const item of await discover()) {
+        try {
+          await collect(item.m);
+        } catch (error) {
+          if (!(error instanceof EpochBacklogError)) errors.push(error instanceof Error ? error.message : String(error));
+        }
+      }
+      keeperError = errors.join("; ");
       lastKeeper = Date.now();
     } catch (e) {
       keeperError = e instanceof Error ? e.message : String(e);
@@ -281,6 +292,7 @@ async function main() {
       const url = new URL(req.url || "/", "http://127.0.0.1:8787");
       if (req.method === "POST" && req.headers["x-vestra-session"] !== session)
         return json(res, { error: "Invalid session" }, 403);
+      if (req.method === "GET" && url.pathname === "/api/stocks") return json(res, await stocks());
       if (req.method === "GET" && url.pathname === "/api/bootstrap")
         return json(res, {
           session,
@@ -297,11 +309,15 @@ async function main() {
           cluster: NETWORK.cluster,
           mockQuote: original.mockQuote,
         });
-      if (req.method === "GET" && url.pathname === "/api/launches")
+      if (req.method === "GET" && url.pathname === "/api/launches") {
+        const launches = (await discover()).map(x => x.public);
+        const time = await chainTime(c);
         return json(res, {
-          launches: (await discover()).map((x) => x.public),
-          keeper: { busy: keeperBusy, error: keeperError, lastRun: lastKeeper },
+          launches,
+          keeper: { busy: keeperBusy, error: keeperError, lastRun: lastKeeper,
+            pendingEpochs: launches.reduce((sum, l) => sum + pendingEpochs(l.origin, l.epochSeconds, l.currentEpoch, time), 0) },
         });
+      }
       if (req.method === "POST" && url.pathname === "/api/catalog") {
         const b = await body(req);
         const item = (await discover()).find(
@@ -324,12 +340,11 @@ async function main() {
           !/^[A-Z0-9]{2,10}$/.test(b.symbol)
         )
           throw new Error("Invalid token metadata");
+        if (!validAvatar(b.avatar)) throw new Error("Invalid token logo");
         catalog[b.launch] = {
           name: b.name,
           symbol: b.symbol,
-          avatar: ["✦", "◈", "◎", "✳", "↗"].includes(b.avatar)
-            ? b.avatar
-            : "✦",
+          avatar: b.avatar,
         };
         fs.writeFileSync(catalogFile, JSON.stringify(catalog, null, 2), {
           mode: 0o600,
@@ -344,7 +359,7 @@ async function main() {
           throw new Error("Wallet must be on curve");
         if ((faucetCounts.get(key) || 0) >= 3)
           throw new Error(
-            "Demo funding limit reached for this wallet",
+            "Test token limit reached for this wallet",
           );
         faucetCounts.set(key, (faucetCounts.get(key) || 0) + 1);
         const sol = NETWORK.cluster === "devnet"

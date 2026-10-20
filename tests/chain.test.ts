@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as anchor from "@anchor-lang/core";
-import { Keypair, SystemProgram, Transaction } from "@solana/web3.js";
+import { Keypair, SystemProgram, Transaction, ComputeBudgetProgram } from "@solana/web3.js";
 import {
   AuthorityType, createMint, getAccount, getOrCreateAssociatedTokenAccount,
   mintTo, setAuthority, TOKEN_PROGRAM_ID, createAccount, createMintToInstruction,
@@ -192,4 +192,39 @@ test("custody, authorized funding, weighted rewards, expiry, and reconciliation"
     const vault = (await getAccount(connection, client.rewards(launch))).amount;
     assert.equal(BigInt(s.totalReceived.toString()), BigInt(s.totalPlatformPaid.toString()) + BigInt(s.totalLockerPaid.toString()) + vault);
   });
+  await t.test("one atomic batch settles four epochs with funded rewards and an existing lock-start schedule", async () => {
+    const first = await client.launchState(launch);
+    const time = (await connection.getBlockTime(await connection.getSlot("confirmed")))!;
+    const index = Math.max(first.currentEpoch.toNumber(), Math.floor((time - first.origin.toNumber()) / first.epochSeconds.toNumber())) + 1;
+    // Begin just after a boundary so setup cannot consume the remaining open epoch.
+    await advanceTo(index);
+    // Lock helper prepares the start schedule. Batching must preserve its starts.
+    await lock(3, 100, 0, index + 1, index + 8);
+    await fund(index, 4);
+    const before = await client.launchState(launch);
+    const treasuryBefore = (await getAccount(connection, treasury.address)).amount;
+    const vaultBefore = (await getAccount(connection, client.rewards(launch))).amount;
+    const deadline = before.origin.toNumber() + (index + 4) * before.epochSeconds.toNumber();
+    for (;;) {
+      const now = await connection.getBlockTime(await connection.getSlot("confirmed"));
+      if (now !== null && now >= deadline) break;
+      await sleep(500);
+    }
+    const tx = await client.epochBatch(launch, index, 4, payer.publicKey, quote, treasury.address);
+    tx.instructions.unshift(ComputeBudgetProgram.setComputeUnitLimit({units: 600_000}));
+    const blockhash = await connection.getLatestBlockhash("confirmed");
+    tx.recentBlockhash = blockhash.blockhash;
+    await provider.sendAndConfirm(tx, [], {commitment: "confirmed", blockhash});
+    const after = await client.launchState(launch);
+    assert.equal(after.currentEpoch.toNumber(), index + 4);
+    for (let i = index; i < index + 4; i++) assert.equal((await client.epochState(launch, i)).finalized, true);
+    assert.equal((await client.epochState(launch, index + 4)).totalWeight.toString(), "1500100");
+    assert.equal((await client.epochState(launch, index)).rewards.toString(), (BigInt(before.carry.toString()) + 3n).toString());
+    assert.equal(BigInt(after.totalPlatformPaid.toString()) - BigInt(before.totalPlatformPaid.toString()), 1n);
+    assert.equal((await getAccount(connection, treasury.address)).amount - treasuryBefore, 1n);
+    assert.equal(vaultBefore - (await getAccount(connection, client.rewards(launch))).amount, 1n);
+    const balance = (await getAccount(connection, client.rewards(launch))).amount;
+    assert.equal(BigInt(after.totalReceived.toString()), BigInt(after.totalPlatformPaid.toString()) + BigInt(after.totalLockerPaid.toString()) + balance);
+  });
+
 });
